@@ -137,10 +137,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def _begin_subscription_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     message = await update.effective_message.reply_text("Checking the link...")
     try:
-        info = await extract_channel_info(url)
+        http_client = context.application.bot_data["http_client"]
+        info = await extract_channel_info(url, http_client)
     except Exception:
         logger.exception("Failed to extract YouTube channel from %s", url)
-        await message.edit_text("I could not read that YouTube link.")
+        await message.edit_text(
+            "I could not read that YouTube link.\n\n"
+            "Please try a direct video link, channel link, or @handle link. "
+            "If it keeps failing, YouTube may be blocking metadata access from this server."
+        )
         return
     context.user_data["pending_subscription"] = {
         "channel_id": info.channel_id,

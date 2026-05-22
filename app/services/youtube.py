@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import asyncio
+import html
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
-from yt_dlp import YoutubeDL
 
 from app.utils.youtube import ChannelInfo
 
@@ -22,67 +22,124 @@ class FeedEntry:
     published: datetime | None
 
 
-def _pick_text(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    if isinstance(value, list):
-        for item in value:
-            picked = _pick_text(item)
-            if picked:
-                return picked
-    if isinstance(value, dict):
-        for key in ("channel_id", "channelId", "uploader_id", "uploaderId", "id", "channel_url", "channelUrl"):
-            picked = _pick_text(value.get(key))
-            if picked:
-                return picked
-        for nested in value.values():
-            picked = _pick_text(nested)
-            if picked:
-                return picked
+CHANNEL_ID_RE = re.compile(r"UC[a-zA-Z0-9_-]{22}")
+META_ITEMPROP_RE = re.compile(r'<meta\s+itemprop=["\']channelId["\']\s+content=["\']([^"\']+)["\']', re.I)
+CANONICAL_CHANNEL_RE = re.compile(r'<link\s+rel=["\']canonical["\']\s+href=["\']https://www\.youtube\.com/channel/([^"\']+)["\']', re.I)
+JSON_CHANNEL_ID_RE = re.compile(r'"channelId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"')
+JSON_EXTERNAL_ID_RE = re.compile(r'"externalId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"')
+OG_TITLE_RE = re.compile(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', re.I)
+TITLE_RE = re.compile(r"<title>(.*?)</title>", re.I | re.S)
+
+
+def _normalize_channel_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if CHANNEL_ID_RE.fullmatch(value):
+        return value
+    match = CHANNEL_ID_RE.search(value)
+    if match:
+        return match.group(0)
     return None
 
 
-def _extract_channel_id(info: dict[str, Any]) -> str | None:
-    for key in ("channel_id", "channelId", "uploader_id", "uploaderId"):
-        value = info.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    nested = info.get("channel")
-    if isinstance(nested, dict):
-        value = _pick_text(nested)
+def _extract_direct_channel_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    for part in path_parts:
+        channel_id = _normalize_channel_id(part)
+        if channel_id:
+            return channel_id
+    query_channel = parse_qs(parsed.query).get("channel_id", [""])[0]
+    return _normalize_channel_id(query_channel)
+
+
+def _extract_channel_id_from_html(page: str) -> str | None:
+    for pattern in (META_ITEMPROP_RE, CANONICAL_CHANNEL_RE, JSON_EXTERNAL_ID_RE, JSON_CHANNEL_ID_RE):
+        match = pattern.search(page)
+        if match:
+            channel_id = _normalize_channel_id(match.group(1))
+            if channel_id:
+                return channel_id
+    return None
+
+
+def _extract_channel_name_from_html(page: str) -> str | None:
+    for pattern in (OG_TITLE_RE, TITLE_RE):
+        match = pattern.search(page)
+        if not match:
+            continue
+        value = html.unescape(match.group(1)).strip()
+        value = re.sub(r"\s+-\s+YouTube\s*$", "", value).strip()
         if value:
             return value
     return None
 
 
-def _extract_channel_name(info: dict[str, Any]) -> str:
-    for key in ("channel", "channel_title", "channel_title", "uploader", "uploader_id", "title"):
-        value = info.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
+    response = await client.get(
+        url,
+        follow_redirects=True,
+        timeout=httpx.Timeout(20.0),
+        headers={
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": "Mozilla/5.0 compatible; yoututubefollowbot/1.0",
+        },
+    )
+    response.raise_for_status()
+    return response.text
+
+
+async def _fetch_oembed_name(client: httpx.AsyncClient, url: str) -> str | None:
+    try:
+        response = await client.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            timeout=httpx.Timeout(10.0),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return None
+    author = data.get("author_name")
+    return author.strip() if isinstance(author, str) and author.strip() else None
+
+
+async def _resolve_channel_name(client: httpx.AsyncClient, channel_id: str, fallback_url: str, page: str | None) -> str:
+    if page:
+        name = _extract_channel_name_from_html(page)
+        if name:
+            return name
+    name = await _fetch_oembed_name(client, fallback_url)
+    if name:
+        return name
+    try:
+        entries = await fetch_channel_feed(client, channel_id)
+    except Exception:
+        logger.warning("Could not fetch channel feed while resolving name for channel_id=%s", channel_id)
+    else:
+        if entries:
+            return "YouTube channel"
     return "YouTube channel"
 
 
-async def extract_channel_info(url: str) -> ChannelInfo:
-    def _extract() -> ChannelInfo:
-        options = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-            "skip_download": True,
-        }
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
-        if not isinstance(info, dict):
-            raise ValueError("yt-dlp returned an unexpected response")
-        channel_id = _extract_channel_id(info)
-        if not channel_id:
-            raise ValueError("Could not determine the canonical YouTube channel_id")
-        channel_name = _extract_channel_name(info)
-        source_url = str(info.get("channel_url") or info.get("webpage_url") or url)
-        return ChannelInfo(channel_id=channel_id, channel_name=channel_name, source_url=source_url)
-
-    return await asyncio.to_thread(_extract)
+async def extract_channel_info(url: str, client: httpx.AsyncClient | None = None) -> ChannelInfo:
+    close_client = client is None
+    http_client = client or httpx.AsyncClient()
+    try:
+        channel_id = _extract_direct_channel_id(url)
+        page: str | None = None
+        if channel_id is None:
+            page = await _fetch_text(http_client, url)
+            channel_id = _extract_channel_id_from_html(page)
+        if channel_id is None:
+            raise ValueError("Could not determine the canonical YouTube channel_id from page metadata")
+        channel_url = f"https://www.youtube.com/channel/{channel_id}"
+        channel_name = await _resolve_channel_name(http_client, channel_id, url, page)
+        return ChannelInfo(channel_id=channel_id, channel_name=channel_name, source_url=channel_url)
+    finally:
+        if close_client:
+            await http_client.aclose()
 
 
 def parse_published(value: str | None) -> datetime | None:
@@ -125,4 +182,3 @@ async def fetch_channel_feed(client: httpx.AsyncClient, channel_id: str) -> list
     response = await client.get(url, timeout=httpx.Timeout(20.0))
     response.raise_for_status()
     return parse_atom_feed(response.text)
-

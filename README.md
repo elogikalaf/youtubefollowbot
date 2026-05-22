@@ -11,7 +11,6 @@ Private Telegram bot for approved users to subscribe to YouTube channels and rec
 - SQLAlchemy 2.x
 - uvicorn
 - httpx
-- yt-dlp
 - asyncio
 
 ## Project layout
@@ -28,12 +27,11 @@ Private Telegram bot for approved users to subscribe to YouTube channels and rec
 
 ```bash
 sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3-pip ffmpeg nginx sqlite3
+sudo apt install -y python3.12 python3.12-venv python3-pip nginx sqlite3
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-python -m yt_dlp --version
 ```
 
 ## Configuration
@@ -87,7 +85,7 @@ Unapproved users always receive:
 ## WebSub flow
 
 1. User submits a YouTube URL.
-2. The bot uses `yt-dlp` to extract the canonical `channel_id`.
+2. The bot resolves the canonical `channel_id` from YouTube URL and page metadata.
 3. The subscription is stored per user in SQLite.
 4. If this is the first global subscription for that channel, the app subscribes to WebSub using:
 
@@ -211,14 +209,6 @@ git pull
 source .venv/bin/activate
 pip install -r requirements.txt
 sudo systemctl restart youtubebot
-```
-
-### Update yt-dlp safely
-
-```bash
-source .venv/bin/activate
-pip install -U yt-dlp
-python -m yt_dlp --version
 ```
 
 ### Debug failed webhook deliveries
