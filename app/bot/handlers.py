@@ -44,6 +44,7 @@ async def _ensure_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def register_handlers(application: Application) -> None:
+    application.add_error_handler(handle_error)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("subscriptions", subscriptions_command))
@@ -57,6 +58,10 @@ def register_handlers(application: Application) -> None:
 async def unauthorized_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and not _allowed(context, update.effective_user.id):
         await _deny(update)
+
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled bot error", exc_info=context.error)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,12 +283,11 @@ async def _show_subscriptions(
         return
     lines = ["Your subscriptions:"]
     lines.extend(f"• {name}" for _, name in items)
-    buttons = [
-        [InlineKeyboardButton(f"❌ {channel_name}", callback_data=f"unsub:{channel_id}")]
-        for channel_id, channel_name in items
-    ]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for channel_id, channel_name in items:
+        buttons.append([InlineKeyboardButton(f"❌ {channel_name}", callback_data=f"unsub:{channel_id}")])
     markup = pagination_keyboard(page, total_pages)
-    markup.inline_keyboard = buttons + markup.inline_keyboard
+    markup.inline_keyboard = buttons + [list(row) for row in markup.inline_keyboard]
     if update.callback_query:
         await update.callback_query.message.edit_text("\n".join(lines), reply_markup=markup)
     else:
