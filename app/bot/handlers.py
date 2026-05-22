@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from math import ceil
 
-from telegram import InlineKeyboardButton, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.bot.keyboards import confirmation_keyboard, main_menu_keyboard, pagination_keyboard
@@ -283,11 +283,12 @@ async def _show_subscriptions(
         return
     lines = ["Your subscriptions:"]
     lines.extend(f"• {name}" for _, name in items)
-    buttons: list[list[InlineKeyboardButton]] = []
-    for channel_id, channel_name in items:
-        buttons.append([InlineKeyboardButton(f"❌ {channel_name}", callback_data=f"unsub:{channel_id}")])
-    markup = pagination_keyboard(page, total_pages)
-    markup.inline_keyboard = buttons + [list(row) for row in markup.inline_keyboard]
+    buttons: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(f"❌ {channel_name}", callback_data=f"unsub:{channel_id}")]
+        for channel_id, channel_name in items
+    ]
+    pagination_rows = [list(row) for row in pagination_keyboard(page, total_pages).inline_keyboard]
+    markup = InlineKeyboardMarkup(buttons + pagination_rows)
     if update.callback_query:
         await update.callback_query.message.edit_text("\n".join(lines), reply_markup=markup)
     else:
