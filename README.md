@@ -62,9 +62,6 @@ LOG_LEVEL=INFO
 
 ```bash
 source .venv/bin/activate
-set -a
-. ./.env
-set +a
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -165,9 +162,6 @@ sudo ufw status
 ```bash
 tmux new -s youtubebot
 source .venv/bin/activate
-set -a
-. ./.env
-set +a
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -277,4 +271,3 @@ For safer backups, stop the app first or use SQLite's `.backup` feature.
 - The bot uses WebSub push notifications, not aggressive polling, for YouTube uploads.
 - A reconciliation task runs every 6 hours to catch missed uploads.
 - WebSub renewal runs every 12 hours.
-

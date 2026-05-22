@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 def _parse_allowed_ids(raw: str | None) -> frozenset[int]:
     if not raw:
@@ -32,6 +34,8 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    load_dotenv()
+
     bot_token = os.environ.get("BOT_TOKEN", "").strip()
     base_url = os.environ.get("BASE_URL", "").strip()
     database_path = Path(os.environ.get("DATABASE_PATH", "data/bot.sqlite3").strip())
@@ -56,4 +60,3 @@ def load_settings() -> Settings:
         allowed_user_ids=allowed_user_ids,
         log_level=log_level,
     )
-
