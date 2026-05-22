@@ -26,8 +26,8 @@ class BackgroundScheduler:
 
     def start(self) -> None:
         self.tasks = [
-            asyncio.create_task(self._loop("websub-renew", 12 * 60 * 60, self._renew_loop())),
-            asyncio.create_task(self._loop("reconcile", 6 * 60 * 60, self._reconcile_loop())),
+            asyncio.create_task(self._loop("websub-renew", 12 * 60 * 60, self._renew_loop)),
+            asyncio.create_task(self._loop("reconcile", 6 * 60 * 60, self._reconcile_loop)),
         ]
 
     async def stop(self) -> None:
