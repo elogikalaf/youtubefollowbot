@@ -451,6 +451,14 @@ async def fetch_channel_feed(
     response = await client.get(
         url,
         timeout=httpx.Timeout(20.0),
+        headers={
+            "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "compatible; youtubefollowbot/1.0"
+            ),
+        },
     )
 
     response.raise_for_status()

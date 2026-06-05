@@ -14,6 +14,7 @@ from app.services.subscriptions import (
     create_subscription,
     delete_subscription,
     get_channel_name,
+    get_user_subscribed_channel,
     list_user_subscriptions,
     save_channel,
     upsert_user,
@@ -232,21 +233,21 @@ async def _show_recent_uploads_for_channel(
     query = update.callback_query
     session_factory = context.application.bot_data["session_factory"]
     http_client = context.application.bot_data["http_client"]
+    settings = context.application.bot_data["settings"]
     user = update.effective_user
 
     async with session_factory() as session:
-        subscriptions = await list_user_subscriptions(
+        channel = await get_user_subscribed_channel(
             session,
             telegram_user_id=user.id,
-            offset=0,
-            limit=500,
+            channel_id=channel_id,
         )
 
-    channel_name = next((name for subscribed_id, name in subscriptions if subscribed_id == channel_id), None)
-
-    if channel_name is None:
+    if channel is None:
         await query.message.edit_text("That subscription was not found.", reply_markup=None)
         return
+
+    channel_name = channel.channel_name
 
     await query.message.edit_text(f"Checking recent uploads for {channel_name}...")
 
@@ -256,6 +257,47 @@ async def _show_recent_uploads_for_channel(
         logger.exception("Failed to fetch recent uploads for channel_id=%s", channel_id)
         await query.message.edit_text("I could not fetch recent uploads for that channel.")
         return
+
+    if not entries:
+        try:
+            repaired_info = await extract_channel_info(channel.source_url, http_client)
+            if repaired_info.channel_id != channel_id:
+                repaired_entries = await fetch_channel_feed(http_client, repaired_info.channel_id)
+                if repaired_entries:
+                    async with session_factory() as session:
+                        await save_channel(
+                            session,
+                            channel_id=repaired_info.channel_id,
+                            channel_name=repaired_info.channel_name,
+                            source_url=repaired_info.source_url,
+                        )
+                        await create_subscription(
+                            session,
+                            telegram_user_id=user.id,
+                            channel_id=repaired_info.channel_id,
+                        )
+                        await delete_subscription(
+                            session,
+                            telegram_user_id=user.id,
+                            channel_id=channel_id,
+                        )
+                        await session.commit()
+                    await ensure_global_websub_subscription(
+                        session_factory,
+                        http_client,
+                        channel_id=repaired_info.channel_id,
+                        callback_url=settings.webhook_callback_url,
+                        secret=settings.webhook_secret,
+                    )
+                    channel_id = repaired_info.channel_id
+                    channel_name = repaired_info.channel_name
+                    entries = repaired_entries
+        except Exception:
+            logger.warning(
+                "Could not repair empty recent upload feed for channel_id=%s",
+                channel_id,
+                exc_info=True,
+            )
 
     entries.sort(
         key=lambda entry: entry.published or datetime.min.replace(tzinfo=timezone.utc),

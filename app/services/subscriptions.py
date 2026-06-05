@@ -132,6 +132,22 @@ async def list_user_subscriptions(
     return [(row[0], row[1]) for row in result.all()]
 
 
+async def get_user_subscribed_channel(
+    session: AsyncSession,
+    *,
+    telegram_user_id: int,
+    channel_id: str,
+) -> YouTubeChannel | None:
+    return await session.scalar(
+        select(YouTubeChannel)
+        .join(UserSubscription, UserSubscription.channel_id == YouTubeChannel.channel_id)
+        .where(
+            UserSubscription.telegram_user_id == telegram_user_id,
+            YouTubeChannel.channel_id == channel_id,
+        )
+    )
+
+
 async def count_user_subscriptions(session: AsyncSession, *, telegram_user_id: int) -> int:
     result = await session.scalar(
         select(func.count()).select_from(UserSubscription).where(UserSubscription.telegram_user_id == telegram_user_id)
@@ -187,4 +203,3 @@ async def record_sent_video(
 async def has_sent_video(session: AsyncSession, *, video_id: str) -> bool:
     result = await session.scalar(select(SentVideo.id).where(SentVideo.video_id == video_id))
     return result is not None
-
