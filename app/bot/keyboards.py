@@ -9,7 +9,8 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton("➕ Subscribe"), KeyboardButton("📺 My Subscriptions")],
-            [KeyboardButton("❌ Unsubscribe"), KeyboardButton("ℹ️ Help")],
+            [KeyboardButton("🆕 Recent Uploads"), KeyboardButton("❌ Unsubscribe")],
+            [KeyboardButton("ℹ️ Help")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -42,4 +43,3 @@ def pagination_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
 
 def subscription_row_keyboard(channel_id: str, label: str) -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(f"❌ {label}", callback_data=f"unsub:{channel_id}")]
-

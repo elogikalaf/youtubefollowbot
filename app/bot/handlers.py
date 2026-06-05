@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from math import ceil
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -18,11 +19,12 @@ from app.services.subscriptions import (
     upsert_user,
 )
 from app.services.websub import ensure_global_websub_subscription, maybe_unsubscribe_global_websub
-from app.services.youtube import extract_channel_info
-from app.utils.youtube import looks_like_youtube_url
+from app.services.youtube import extract_channel_info, fetch_channel_feed
+from app.utils.youtube import looks_like_youtube_reference, normalize_youtube_reference
 
 logger = logging.getLogger(__name__)
 PAGE_SIZE = 6
+RECENT_UPLOAD_LIMIT = 10
 
 
 def _allowed(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
@@ -69,7 +71,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = (
         "Welcome.\n\n"
-        "Send a YouTube link to subscribe to channel uploads. "
+        "Send a YouTube link, @handle, or channel ID to subscribe to channel uploads. "
         "You will receive a Telegram notification whenever a new video appears."
     )
     await update.effective_message.reply_text(text, reply_markup=main_menu_keyboard())
@@ -79,12 +81,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not await _ensure_allowed(update, context):
         return
     text = (
-        "Send a YouTube link, channel link, shorts link, @handle, or custom channel URL.\n\n"
+        "Send a YouTube link, channel link, shorts link, @handle, custom channel URL, or channel ID.\n\n"
         "Supported examples:\n"
         "https://www.youtube.com/watch?v=VIDEO_ID\n"
         "https://youtu.be/VIDEO_ID\n"
         "https://www.youtube.com/shorts/VIDEO_ID\n"
-        "https://www.youtube.com/@handle\n\n"
+        "https://www.youtube.com/@handle\n"
+        "@handle\n"
+        "UCxxxxxxxxxxxxxxxxxxxxxx\n\n"
         "Upload notifications will include the channel name, video title, and a clickable YouTube link."
     )
     await update.effective_message.reply_text(text, reply_markup=main_menu_keyboard())
@@ -115,7 +119,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text == "➕ Subscribe":
         context.user_data["awaiting_subscription_url"] = True
         await update.effective_message.reply_text(
-            "Send the YouTube link you want to subscribe to.",
+            "Send the YouTube link, @handle, or channel ID you want to subscribe to.",
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -125,30 +129,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text == "❌ Unsubscribe":
         await _show_subscriptions(update, context, page=0, prompt_unsubscribe=True)
         return
+    if "recent uploads" in text.lower():
+        await _show_recent_upload_channels(update, context, page=0)
+        return
     if text == "ℹ️ Help":
         await help_command(update, context)
         return
-    if context.user_data.get("awaiting_subscription_url") and looks_like_youtube_url(text):
+    if context.user_data.get("awaiting_subscription_url") and looks_like_youtube_reference(text):
         context.user_data.pop("awaiting_subscription_url", None)
         await _begin_subscription_flow(update, context, text)
         return
-    if looks_like_youtube_url(text):
+    if looks_like_youtube_reference(text):
         await _begin_subscription_flow(update, context, text)
         return
     if context.user_data.get("awaiting_subscription_url"):
-        await update.effective_message.reply_text("That does not look like a YouTube link.")
+        await update.effective_message.reply_text("That does not look like a YouTube link, @handle, or channel ID.")
 
 
 async def _begin_subscription_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     message = await update.effective_message.reply_text("Checking the link...")
+    normalized_url = normalize_youtube_reference(url)
+    if normalized_url is None:
+        await message.edit_text("That does not look like a YouTube link, @handle, or channel ID.")
+        return
     try:
         http_client = context.application.bot_data["http_client"]
-        info = await extract_channel_info(url, http_client)
+        info = await extract_channel_info(normalized_url, http_client)
     except Exception:
-        logger.exception("Failed to extract YouTube channel from %s", url)
+        logger.exception("Failed to extract YouTube channel from %s", normalized_url)
         await message.edit_text(
-            "I could not read that YouTube link.\n\n"
-            "Please try a direct video link, channel link, or @handle link. "
+            "I could not read that YouTube channel.\n\n"
+            "Please try a direct video link, channel link, @handle, or channel ID. "
             "If it keeps failing, YouTube may be blocking metadata access from this server."
         )
         return
@@ -160,6 +171,112 @@ async def _begin_subscription_flow(update: Update, context: ContextTypes.DEFAULT
     await message.edit_text(
         f"Subscribe to:\n{info.channel_name}",
         reply_markup=confirmation_keyboard("sub_confirm", "sub_cancel"),
+    )
+
+
+async def _show_recent_upload_channels(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    page: int,
+) -> None:
+    session_factory = context.application.bot_data["session_factory"]
+    user = update.effective_user
+
+    async with session_factory() as session:
+        total = await count_user_subscriptions(session, telegram_user_id=user.id)
+        total_pages = max(1, ceil(total / PAGE_SIZE))
+        page = max(0, min(page, total_pages - 1))
+        subscriptions = await list_user_subscriptions(
+            session,
+            telegram_user_id=user.id,
+            offset=page * PAGE_SIZE,
+            limit=PAGE_SIZE,
+        )
+
+    if not subscriptions:
+        text = "You do not have any subscriptions yet."
+        if update.callback_query:
+            await update.callback_query.message.edit_text(text, reply_markup=None)
+        else:
+            await update.effective_message.reply_text(text, reply_markup=main_menu_keyboard())
+        return
+
+    buttons: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(channel_name, callback_data=f"recent_channel:{channel_id}")]
+        for channel_id, channel_name in subscriptions
+    ]
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"recent_page:{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"recent_page:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("↩️ Menu", callback_data="menu:main")])
+
+    markup = InlineKeyboardMarkup(buttons)
+    text = "Select a channel:"
+
+    if update.callback_query:
+        await update.callback_query.message.edit_text(text, reply_markup=markup)
+    else:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def _show_recent_uploads_for_channel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    channel_id: str,
+) -> None:
+    query = update.callback_query
+    session_factory = context.application.bot_data["session_factory"]
+    http_client = context.application.bot_data["http_client"]
+    user = update.effective_user
+
+    async with session_factory() as session:
+        subscriptions = await list_user_subscriptions(
+            session,
+            telegram_user_id=user.id,
+            offset=0,
+            limit=500,
+        )
+
+    channel_name = next((name for subscribed_id, name in subscriptions if subscribed_id == channel_id), None)
+
+    if channel_name is None:
+        await query.message.edit_text("That subscription was not found.", reply_markup=None)
+        return
+
+    await query.message.edit_text(f"Checking recent uploads for {channel_name}...")
+
+    try:
+        entries = await fetch_channel_feed(http_client, channel_id)
+    except Exception:
+        logger.exception("Failed to fetch recent uploads for channel_id=%s", channel_id)
+        await query.message.edit_text("I could not fetch recent uploads for that channel.")
+        return
+
+    entries.sort(
+        key=lambda entry: entry.published or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+    if not entries:
+        await query.message.edit_text(f"No recent uploads were found for {channel_name}.")
+        return
+
+    lines = [f"Recent uploads for {channel_name}:"]
+
+    for entry in entries[:RECENT_UPLOAD_LIMIT]:
+        lines.append(
+            f"\n• {entry.title}\n"
+            f"https://www.youtube.com/watch?v={entry.video_id}"
+        )
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        disable_web_page_preview=True,
     )
 
 
@@ -185,6 +302,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("subs_page:"):
         page = int(data.split(":", 1)[1])
         await _show_subscriptions(update, context, page=page)
+        return
+    if data.startswith("recent_page:"):
+        page = int(data.split(":", 1)[1])
+        await _show_recent_upload_channels(update, context, page=page)
+        return
+    if data.startswith("recent_channel:"):
+        channel_id = data.split(":", 1)[1]
+        await _show_recent_uploads_for_channel(update, context, channel_id)
         return
     if data.startswith("unsub:"):
         channel_id = data.split(":", 1)[1]
